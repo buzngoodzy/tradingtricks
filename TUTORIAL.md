@@ -74,6 +74,8 @@ python -c "import backtrader; print(backtrader.__version__)"
 
 This should print the installed version of Backtrader, e.g., `1.9.76.123`.
 
+The script also uses built-in Python libraries like `os` (for operating system interactions like file path checking) and `glob` (for finding files using patterns), which are part of the standard Python installation and do not require separate installs.
+
 ---
 
 ## Section 2: Understanding the Code (`backtrader_app.py`)
@@ -84,14 +86,14 @@ This section breaks down the structure and key components of the `backtrader_app
 
 The `backtrader_app.py` script is organized into several main parts:
 
-1.  **Imports:** Necessary libraries like `backtrader`, `datetime`, and `matplotlib`.
+1.  **Imports:** Necessary libraries like `backtrader`, `datetime`, `matplotlib`, `os`, and `glob`.
 2.  **`GenericCSV_IMFData` Class:** A custom class for loading data from CSV files in a specific format.
 3.  **`SMACrossoverStrategy` Class:** The core trading strategy logic.
 4.  **`run_backtest()` Function:** Sets up and runs the Backtrader engine (Cerebro), including data loading, strategy configuration, broker settings, analyzers, and plotting.
 5.  **Main Execution Block (`if __name__ == '__main__':`)**: Calls `run_backtest()` when the script is executed.
 6.  **Conceptual Comments:** Sections at the end of the script provide insights into live trading, and comparisons with other frameworks like QuantConnect LEAN and Freqtrade.
 
-### 2.2. Data Handling (`GenericCSV_IMFData` class)
+### 2.2. Data Handling (`GenericCSV_IMFData` class & `run_backtest` data loading)
 
 *   **Purpose:** This class inherits from `bt.feeds.GenericCSVData` and is tailored to load OHLCV (Open, High, Low, Close, Volume) stock data from CSV files.
 *   **Key `params`:** These parameters within the class tell Backtrader how to map the columns in your CSV file to the data fields it expects:
@@ -106,12 +108,26 @@ The `backtrader_app.py` script is organized into several main parts:
 *   **Instantiation in `run_backtest()`:**
     ```python
     data_feed = GenericCSV_IMFData(
-        dataname='sample_imf_data.csv',  # Name of the CSV file
-        fromdate=datetime.datetime(2020, 1, 1), # Start date for backtest
-        todate=datetime.datetime(2020, 1, 24)    # End date for backtest
+        dataname=dataname,  # Name of the CSV file (dynamically determined)
+        fromdate=fromdate, # Start date for backtest
+        todate=todate    # End date for backtest
     )
     ```
-    The `sample_imf_data.csv` file is used by default, with a specific date range.
+    The actual `dataname`, `fromdate`, and `todate` are determined by the dynamic CSV file search logic.
+
+#### Dynamic CSV File Search Logic (in `run_backtest()`)
+
+The script implements a dynamic way to find and use a CSV data file:
+
+1.  **Preferred File:** It first checks if a `preferred_dataname` (set to `sample_imf_data.csv`) exists using `os.path.exists(preferred_dataname)`. If found, this file is used.
+2.  **Alternative Search:** If the preferred file isn't found, the script uses `glob.glob('*.csv')` to find all files ending with `.csv` in the current directory.
+3.  **Auto-Selection:**
+    *   If multiple CSV files are found, it sorts them alphabetically and picks the first one. A message is printed indicating which file was selected and lists other available CSV files.
+    *   If only one CSV file is found, it's used.
+4.  **Error Handling:** If no CSV files are found in the directory (neither the preferred one nor any other), the script prints a critical error message and exits, as it cannot proceed without data.
+5.  **Data Sufficiency & Date Range:**
+    *   The script attempts to automatically set `fromdate` and `todate` based on the selected CSV file's content (by reading the first and last date entries).
+    *   It's crucial that the selected CSV file has enough data points for the indicators used in the strategy (e.g., at least as many data points as the `slow_sma_period`). The script includes error handling for `IndexError` during `cerebro.run()`, which often indicates insufficient data for indicator calculation.
 
 ### 2.3. Strategy Definition (`SMACrossoverStrategy` class)
 
@@ -121,260 +137,127 @@ This class contains the logic for the trading strategy.
 *   **`params`:**
     ```python
     params = (
-        ('fast_sma_period', 10),  # Period for the fast SMA
-        ('slow_sma_period', 30),  # Period for the slow SMA
-        ('stop_loss_perc', 0.05), # Percentage for stop-loss (0.05 = 5%)
+        ('fast_sma_period', 10),
+        ('slow_sma_period', 30),
+        ('stop_loss_perc', 0.05), # 5% stop-loss
+        ('printlog', True),      # New parameter to enable/disable logging
     )
     ```
-    These define configurable parameters for the strategy. You can change their default values here or when adding the strategy to Cerebro.
+    The `printlog` parameter allows you to control whether the strategy's `log()` messages are printed to the console.
 *   **`__init__(self)` (Constructor):**
-    *   `self.data0 = self.datas[0]`: A reference to the primary data feed.
-    *   **Indicator Creation:**
-        *   `self.fast_sma = bt.indicators.SimpleMovingAverage(self.data0.close, period=self.p.fast_sma_period)`: Creates a fast SMA based on the closing prices of the data feed, using the `fast_sma_period` parameter.
-        *   `self.slow_sma = bt.indicators.SimpleMovingAverage(self.data0.close, period=self.p.slow_sma_period)`: Creates a slow SMA.
-        *   `self.sma_crossover = bt.indicators.CrossOver(self.fast_sma, self.slow_sma)`: This indicator signals when the fast SMA crosses above (`> 0`) or below (`< 0`) the slow SMA.
-    *   **Order Tracking:**
-        *   `self.order = None`: Stores the currently pending order.
-        *   `self.buyprice = None`: Stores the execution price of the last buy order (used for P/L calculation in logs and for stop-loss calculation).
-        *   `self.stop_loss_order = None`: Specifically tracks the stop-loss order associated with an open position.
-*   **`log(self, txt, dt=None)`:** A utility method to print log messages with the current simulation date/time.
-*   **`notify_order(self, order)`:** This method is called by Backtrader whenever there's an update to an order's status.
-    *   It tracks the lifecycle: `Submitted`, `Accepted`, `Completed`, `Canceled`, `Margin`, `Rejected`.
-    *   **Stop-Loss Logic:**
-        1.  When a `BUY` order is `Completed`:
-            *   The buy price (`self.buyprice`) is recorded.
-            *   A stop-loss price is calculated (e.g., 5% below `self.buyprice` using `self.p.stop_loss_perc`).
-            *   A `SELL` order of type `bt.Order.Stop` is placed at this stop_price. This order `self.stop_loss_order` remains pending until the price drops to that level or the position is closed by another signal.
-        2.  If the `SELL` order that gets `Completed` was the `self.stop_loss_order`, it's logged as such.
-*   **`notify_trade(self, trade)`:** Called when a trade is opened or closed. The script uses it to log the profit or loss when a trade is closed.
-*   **`next(self)`:** This is the heart of the strategy, called on each new bar of data (e.g., each day).
-    *   `if self.order: return`: If an order is already pending, do nothing.
-    *   `if not self.position:`: Checks if the strategy is currently holding a position.
-        *   **Buy Condition:** `if self.sma_crossover[0] > 0:`: If not in a position and the fast SMA has crossed above the slow SMA (crossover indicator is positive), a buy order is created: `self.order = self.buy()`.
+    *   `self.data_close = self.datas[0].close`: A reference to the closing prices of the primary data feed.
+    *   `self.data_datetime = self.datas[0].datetime`: A reference to the datetime line of the primary data feed.
+    *   **Indicator Creation:** SMAs and Crossover are created as before, using `self.data_close`.
+    *   **Order Tracking:** `self.order`, `self.buyprice`, `self.buycomm`, and `self.stop_loss_order` are initialized. `buycomm` is added to track commission for the buy trade.
+*   **`log(self, txt, dt=None, doprint=False)`:**
+    *   The `doprint` parameter, if `True`, forces the message to print regardless of `self.p.printlog`.
+    *   The actual printing is controlled by: `if self.p.printlog or doprint:`. This allows selective logging.
+*   **`notify_order(self, order)`:** This method handles order status updates with refined logic:
+    *   **Submitted/Accepted:** Logs the order type, status, reference, size, and price.
+    *   **Completed Buy Order:**
+        *   Logs execution details (price, cost, commission, size).
+        *   Stores `self.buyprice = order.executed.price` and `self.buycomm = order.executed.comm`.
+        *   Calculates `stop_price` based on `self.buyprice` and `self.p.stop_loss_perc`.
+        *   Places a `SELL` order of type `bt.Order.Stop` at `stop_price`, using `parent=order` to link it to the buy order. `self.stop_loss_order` tracks this stop order.
+        *   Logs the placement of the stop-loss order.
+    *   **Completed Sell Order:**
+        *   Logs execution details.
+        *   If it was the `self.stop_loss_order` that executed, it logs "STOP-LOSS ORDER EXECUTED" and clears `self.stop_loss_order`.
+        *   If it was a regular sell (profit-taking), it logs "PROFIT-TAKING SELL EXECUTED". If there was an active `self.stop_loss_order`, it cancels it using `self.cancel(self.stop_loss_order)` and logs the cancellation.
+    *   **Other Statuses (`Canceled`, `Margin`, `Rejected`, `Expired`):**
+        *   Logs the order status and reference.
+        *   If the affected order was the `self.stop_loss_order`, it logs this fact and clears `self.stop_loss_order`.
+    *   `self.order = None`: This line is executed if the order is not `Accepted` or `Submitted` (i.e., it has reached a final state like `Completed`, `Canceled`, etc.), ensuring the strategy can place new orders.
+*   **`notify_trade(self, trade)`:**
+    *   Called when a trade is opened or closed.
+    *   If a trade is closed (`trade.isclosed`), it logs the gross P&L, net P&L (including commissions), and total commission for that trade.
+    *   Resets `self.buyprice = None` and `self.buycomm = None` after a trade is closed, preparing for the next potential trade.
+*   **`next(self)`:** This is the core strategy logic.
+    *   A commented-out line `self.log(f'Close: {self.data_close[0]:.2f}, FastSMA: {self.fast_sma[0]:.2f}, SlowSMA: {self.slow_sma[0]:.2f}, Crossover: {self.sma_crossover[0]:.2f}')` provides an example of detailed logging for debugging.
+    *   `if self.order: return`: If an order is pending, do nothing.
+    *   `if not self.position:`: Checks if the strategy is holding a position.
+        *   **Buy Condition:** `if self.sma_crossover[0] > 0:` (Fast SMA crosses above Slow SMA), logs the buy signal and places a market buy order: `self.order = self.buy()`.
     *   `else:` (If already in a position):
-        *   **Sell Condition:** `if self.sma_crossover[0] < 0:`: If in a position and the fast SMA has crossed below the slow SMA (crossover indicator is negative), a sell order is created to close the position: `self.order = self.sell()`.
-        *   The stop-loss order (if active) will automatically trigger a sell if its price condition is met, independently of this crossover logic.
+        *   **Sell Condition:** `if self.sma_crossover[0] < 0:` (Fast SMA crosses below Slow SMA), logs the sell signal (profit-taking/trend reversal) and places a market sell order: `self.order = self.sell()`.
+        *   When this regular sell order is executed, the `notify_order` method will handle the cancellation of any active stop-loss order.
 
 ### 2.4. Backtesting Engine (`run_backtest()` function & Cerebro)
 
 This function orchestrates the backtest.
 
-*   `cerebro = bt.Cerebro()`: `Cerebro` is the central engine or "brain" in Backtrader.
-*   `cerebro.adddata(data_feed)`: Adds the prepared data feed to Cerebro.
-*   `cerebro.addstrategy(SMACrossoverStrategy, fast_sma_period=5, slow_sma_period=15)`: Adds the strategy to Cerebro. Notice how parameters like `fast_sma_period` can be overridden here from their defaults in the strategy class.
-*   **Broker Settings:**
-    *   `cerebro.broker.setcash(100000.0)`: Sets the initial portfolio cash.
-    *   `cerebro.broker.setcommission(commission=0.001)`: Sets a commission rate (e.g., 0.1% per trade).
-*   **Sizer:**
-    *   `cerebro.addsizer(bt.sizers.FixedSize, stake=10)`: Determines how many shares/units to trade. `FixedSize` means it will trade a fixed number of `stake` (e.g., 10 shares) per trade.
-*   **Analyzers:** These tools evaluate the strategy's performance.
-    *   `cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name='sharpe_ratio', ...)`: Calculates the Sharpe Ratio, a measure of risk-adjusted return.
-    *   `cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name='trade_analyzer')`: Provides detailed statistics about individual trades (total trades, wins, losses, profit/loss per trade, etc.).
-    *   `cerebro.addanalyzer(bt.analyzers.SQN, _name='sqn')`: Calculates the System Quality Number, which assesses the "quality" of the trading system.
-    *   **Accessing Results:** After running Cerebro, analyzer results are accessed like this: `results[0].analyzers.analyzer_name.get_analysis()`.
-*   `results = cerebro.run()`: Starts the backtesting process. `results` will contain a list of strategy instances, each holding its analyzer data.
-*   `cerebro.plot(style='candlestick', volume=True)`: Generates a plot showing:
-    *   Candlestick price bars.
-    *   Volume bars.
-    *   SMA indicator lines.
-    *   Buy (up arrow) and Sell (down arrow) markers on the chart.
-    *   (Note: This line is commented out by default in `backtrader_app.py` to allow running in headless environments. You can uncomment it to see the plot.)
-
----
-
-## Section 3: Customizing the Strategy
-
-You can modify the strategy to test different ideas.
-
-### 3.1. Adjusting Parameters
-
-*   **In `SMACrossoverStrategy.params`:** Change the default values directly in the strategy class:
-    ```python
-    class SMACrossoverStrategy(bt.Strategy):
-        params = (
-            ('fast_sma_period', 15),  # Changed from 10
-            ('slow_sma_period', 40),  # Changed from 30
-            ('stop_loss_perc', 0.03), # Changed from 0.05
-        )
-        # ... rest of the class
-    ```
-*   **When Adding Strategy to Cerebro:** Override parameters dynamically in `run_backtest()`:
+*   `enable_plotting = True`: A variable at the start of the function to easily toggle plotting.
+*   `cerebro = bt.Cerebro()`: Initializes Cerebro.
+*   **Adding Strategy:**
     ```python
     cerebro.addstrategy(SMACrossoverStrategy, 
-                        fast_sma_period=15, 
-                        slow_sma_period=40, 
-                        stop_loss_perc=0.03)
+                        fast_sma_period=5, 
+                        slow_sma_period=10, 
+                        stop_loss_perc=0.03, 
+                        printlog=True)
     ```
-    This is often preferred for quick experiments or parameter optimization.
-
-### 3.2. Using Different Indicators
-
-Refer to the conceptual comments in `backtrader_app.py` for ideas (e.g., RSI, MACD).
-General steps:
-
-1.  **Instantiate in `__init__`:**
-    ```python
-    # Example: Adding RSI
-    self.rsi = bt.indicators.RelativeStrengthIndex(period=14) 
-    ```
-2.  **Use in `next()`:**
-    ```python
-    # Hypothetical example: Buy if RSI < 30 and SMA crossover
-    if not self.position:
-        if self.sma_crossover[0] > 0 and self.rsi[0] < 30:
-            self.log(f'BUY CREATE (SMA Crossover & RSI Oversold), Close: {self.data0.close[0]:.2f}, RSI: {self.rsi[0]:.2f}')
-            self.order = self.buy()
-    ```
-
-### 3.3. Modifying Trading Logic in `next()`
-
-*   **Changing Conditions:** You can alter the conditions for `self.sma_crossover`. For instance, if you were implementing a strategy that could also short-sell, you might use `self.sma_crossover[0] < 0` as a short signal (though the current bot is long-only).
-*   **Adding Complexity:** Combine signals from multiple indicators, or add conditions based on price levels, volume, or other market data.
-    ```python
-    # Example: Require SMA crossover AND close price above slow SMA
-    if not self.position:
-        if self.sma_crossover[0] > 0 and self.data0.close[0] > self.slow_sma[0]:
-            self.log(f'BUY CREATE (SMA Crossover & Close > SlowSMA), Close: {self.data0.close[0]:.2f}')
-            self.order = self.buy()
-    ```
+    The strategy is added with specific parameters: `fast_sma_period=5`, `slow_sma_period=10`, `stop_loss_perc=0.03`, and `printlog=True`.
+*   **Sizer:**
+    *   `cerebro.addsizer(bt.sizers.FixedSize, stake=100)`: The stake (number of shares) has been updated to 100.
+*   **Analyzers:**
+    *   `DrawDown`: Measures the largest peak-to-trough decline during the backtest.
+    *   `AnnualReturn`: Calculates the return for each year in the backtest.
+    *   (SharpeRatio, TradeAnalyzer, SQN are still included).
+*   **Running the Backtest:**
+    *   The `cerebro.run()` call is wrapped in a `try-except IndexError` block. This is important because if the data period is too short for the indicator periods (e.g., asking for a 30-period SMA with only 20 data points), Backtrader will raise an `IndexError`. The `except` block catches this, prints an informative error message about data sufficiency, and allows the script to exit gracefully.
+    *   A general `except Exception` block is also included to catch other unexpected errors during the backtest execution.
+*   **Printing Analyzer Results:**
+    *   **DrawDown:** Prints `drawdown.max.drawdown` (percentage) and `drawdown.max.moneydown` (monetary value).
+    *   **AnnualReturn:** Prints the dictionary of yearly returns (e.g., `{2020: 0.152}`).
+    *   The script uses more robust checks like `trade_analysis.total.get('total', 0)` to avoid errors if certain analysis attributes don't exist (e.g., if no trades occurred).
+*   **Plotting:**
+    *   Plotting is now conditional on `enable_plotting` and whether any trades occurred.
+    *   The plot is saved to `backtest_plot.png` using `savefig=True` and `figfilename='backtest_plot.png'`.
+    *   `figscale=1.2` is used to potentially adjust the plot size/resolution.
+    *   A `try-except` block handles potential errors during plotting, especially in headless environments, and advises the user accordingly.
 
 ---
 
 ## Section 4: Running Backtests and Interpreting Results
 
-### 4.1. How to Run
-
-Ensure your terminal is in the project directory and your virtual environment (if used) is active. Then run:
-
-```bash
-python backtrader_app.py
-```
-
-### 4.2. Understanding Console Output
-
-The script will print logs, including:
-
-*   **Strategy Logs:** Messages from the `self.log()` method in the strategy, showing buy/sell signal creations, prices, indicator values, etc.
-    *   Example: `2020-01-06 BUY CREATE, Close: 105.00, FastSMA: 103.90, SlowSMA: 102.70`
-*   **Order Notifications:** Updates on order status from `notify_order()`.
-    *   Example: `2020-01-07 BUY EXECUTED, Price: 105.20, Cost: 1052.00, Comm: 1.05, Size: 10.0`
-    *   Example: `2020-01-07 STOP-LOSS SELL ORDER PLACED: Price: 99.94, Ref: 3`
-*   **Trade Notifications:** Profit/loss details from `notify_trade()` when a position is closed.
-    *   Example: `2020-01-09 TRADE PROFIT, GROSS -2.00, NET -4.10, Commission: 2.10` (This shows a small loss)
-*   **Portfolio Values:** Starting and final portfolio values.
-*   **Analyzer Results:** Summarized performance metrics.
-
 ### 4.3. Interpreting Analyzer Results
 
-*   **Sharpe Ratio:**
-    *   Measures risk-adjusted return. A higher Sharpe Ratio is generally better, indicating better returns for the amount of risk taken. Ratios above 1 are often considered acceptable, above 2 good, but this varies by asset class and timeframe.
-*   **SQN (System Quality Number):**
-    *   A measure of the quality and robustness of a trading system.
-    *   Heuristic interpretation:
-        *   1.6 - 1.9: Below average, but tradable.
-        *   2.0 - 2.4: Average.
-        *   2.5 - 2.9: Good.
-        *   3.0 - 5.0: Excellent.
-        *   > 5.0: Superb.
-*   **TradeAnalyzer:**
-    *   `Total Trades`: Total number of closed trades.
-    *   `Winning Trades`: Number of trades that resulted in a profit.
-    *   `Losing Trades`: Number of trades that resulted in a loss.
-    *   `Net PnL`: Total profit or loss after commissions.
-    *   `Gross PnL`: Total profit or loss before commissions.
-    *   `Longest Winning Streak / Longest Losing Streak`: Consecutive winning/losing trades.
-    *   `Average Winning Trade / Average Losing Trade`: Average PnL for winning/losing trades.
+*   **Sharpe Ratio:** (Explanation remains the same)
+*   **SQN (System Quality Number):** (Explanation remains the same)
+*   **DrawDown:**
+    *   **Maximum Drawdown (%):** The largest percentage drop from a portfolio peak to a subsequent trough during the backtest. It indicates the potential downside risk.
+    *   **Maximum Drawdown (Money):** The monetary value of the largest peak-to-trough decline.
+*   **AnnualReturn:**
+    *   Provides a dictionary where keys are years and values are the percentage returns for those respective years (e.g., `2020: 0.10` means a 10% return in 2020). This helps assess year-over-year performance consistency.
+*   **TradeAnalyzer:** (Explanation remains largely the same, but reflects robust attribute access)
 
 ### 4.4. Viewing the Plot
 
-*   **Enabling the Plot:** If the plot doesn't appear, find this line in `run_backtest()`:
-    ```python
-    # cerebro.plot(style='candlestick', volume=True)
-    ```
-    And uncomment it:
-    ```python
-    cerebro.plot(style='candlestick', volume=True)
-    ```
-    You might also need to ensure your Python environment can display GUI windows (this can sometimes be an issue in very minimal or server environments).
-*   **What to Look For:**
-    *   **Candlesticks:** Represent price action (open, high, low, close) for each period.
-    *   **Volume Bars:** Show trading volume for each period.
-    *   **SMA Lines:** The fast and slow moving average lines plotted over the price.
-    *   **Buy/Sell Markers:** Typically, upward-pointing green/blue triangles indicate buy orders, and downward-pointing red triangles indicate sell orders.
+The backtest plot is automatically saved as `backtest_plot.png` in your project directory if `enable_plotting` is `True` in the script and the backtest completes successfully with at least one trade. You can open this image file to view the results.
 
----
-
-## Section 5: Using Your Own Data
-
-You can test the strategy on your own historical stock data.
-
-### 5.1. CSV File Format Requirements
-
-Your CSV file should ideally follow this structure:
-
-*   **Header Row:** `Date,Open,High,Low,Close,Volume,OpenInterest`
-    *   `OpenInterest` can be a column of zeros if your data doesn't include it or it's not relevant to your strategy.
-*   **Date Format:** `YYYY-MM-DD` (e.g., `2021-10-25`). This must match the `dtformat` in `GenericCSV_IMFData`.
-*   **Data Cleanliness:** Ensure there are no missing values in the `Date`, `Open`, `High`, `Low`, `Close`, and `Volume` columns for the basic operation of this strategy.
-
-### 5.2. Modifying the Script
-
-In the `run_backtest()` function of `backtrader_app.py`:
-
-1.  **Change `dataname`:**
-    Update the `dataname` parameter in the `GenericCSV_IMFData` instantiation to point to your CSV file:
-    ```python
-    data_feed = GenericCSV_IMFData(
-        dataname='path/to/your/custom_data.csv',  # Update this
-        # ... other parameters
-    )
-    ```
-2.  **Adjust `fromdate` and `todate`:**
-    Modify these `datetime.datetime` objects to match the date range available in your data file for the desired backtesting period.
-    ```python
-    fromdate=datetime.datetime(YYYY, M, D), # Your start year, month, day
-    todate=datetime.datetime(YYYY, M, D)    # Your end year, month, day
-    ```
-
-### 5.3. Data Considerations
-
-*   **Sufficient Data:** Ensure you have enough historical data for a meaningful backtest. For daily data, several years might be appropriate depending on the strategy.
-*   **Data Quality:** The quality of your data (accuracy, absence of errors or gaps) is crucial for reliable backtest results.
+*   **What to Look For:** (Explanation remains the same: Candlesticks, Volume, SMA Lines, Buy/Sell Markers)
 
 ---
 
 ## Section 6: Next Steps and Advanced Topics
 
-This bot provides a starting point. Here are ways to continue your learning:
+This bot serves as a foundational example. You can extend and enhance it in numerous ways:
 
-### 6.1. Parameter Optimization
+*   **Explore Conceptual Comments:** Dive into the conceptual comments within `backtrader_app.py`. They offer insights into:
+    *   **Parameter Optimization:** Using `cerebro.optstrategy()` for testing various parameter sets (e.g., SMA periods, stop-loss percentages).
+    *   **Alternative Indicators:** Incorporating other technical indicators like RSI, MACD, Bollinger Bands.
+    *   **Advanced Sizers:** Implementing different position sizing strategies beyond `FixedSize` (e.g., `PercentSizer`).
+    *   **Additional Analyzers & Observers:** Utilizing tools like `DrawDown`, `AnnualReturn`, or `PyFolio` for deeper performance insights, and Observers like `Broker` or `Trades` for visual feedback.
+    *   **Live Trading Adaptations:** Understanding the high-level considerations for transitioning to live trading, including broker integration, real-time data handling, and robust error management.
+    *   **Cerebro Writers:** Learning how to use `cerebro.addwriter()` to save backtest results to files.
+    *   **Alternative Backtrader Frameworks:** The conceptual comparisons to QuantConnect LEAN and Freqtrade provide context on different algorithmic trading system architectures.
 
-*   **Concept:** Testing a strategy with a range of different parameter values (e.g., various SMA periods) to find combinations that yield better historical performance.
-*   **Backtrader Feature:** `cerebro.optstrategy()`. Refer to the conceptual comments in `backtrader_app.py` for a brief introduction. This involves defining ranges for parameters and letting Backtrader run multiple backtests.
+*   **Consult `TUTORIAL.md`:** This document provides a detailed, step-by-step guide on using, understanding the internal workings of, and customizing the bot's components. It's an excellent resource for a deeper dive into the script's functionality.
 
-### 6.2. Exploring Other Backtrader Features
+*   **Official Backtrader Documentation:** For comprehensive information on its API, all features, and advanced usage, the official documentation is invaluable: [https://www.backtrader.com/docu/](https://www.backtrader.com/docu/)
 
-Backtrader is rich in features. Explore:
-
-*   **Sizers:** More advanced ways to determine trade size (e.g., `PercentSizer` to risk a percentage of portfolio equity).
-*   **Observers:** Tools to monitor various aspects during a backtest (e.g., `Broker`, `Trades`, `Value`).
-*   **Writers:** To save backtest results (e.g., trade lists) to files.
-*   (Refer to the conceptual comments in `backtrader_app.py` for hints and the official documentation.)
-
-### 6.3. Live Trading
-
-*   Transitioning to live trading is a significant step that involves:
-    *   Connecting to a brokerage API.
-    *   Robust error handling.
-    *   Careful risk management.
-    *   Ensuring data feeds are live.
-*   The conceptual comments on "Live Trading Extension" in `backtrader_app.py` provide a high-level overview of what's involved. **This bot is NOT ready for live trading out-of-the-box.**
-
-### 6.4. Expanding Knowledge
-
-*   **Official Backtrader Documentation:** The most comprehensive resource: [https://www.backtrader.com/docu/](https://www.backtrader.com/docu/)
-*   **Other Trading Frameworks:** The comparative notes on QuantConnect LEAN and Freqtrade in `backtrader_app.py` can guide you to explore different platforms.
-*   **Financial Markets & Strategy Development:** Continuously learn about financial markets, different types of trading strategies, risk management, and quantitative analysis.
+*   **Expand Financial & Programming Knowledge:**
+    *   Continuously learn about financial markets, diverse trading strategies, quantitative analysis techniques, and robust risk management practices.
+    *   Strengthen your Python programming skills, as this will enable more complex strategy development and customization.
 
 Happy Backtesting!
 ```
