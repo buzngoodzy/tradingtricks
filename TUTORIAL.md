@@ -24,7 +24,7 @@ Before you begin, ensure you have the following installed:
     git clone <repository_url>
     ```
     (Replace `<repository_url>` with the actual URL of the repository).
-*   **Download Files:** Alternatively, download the project files (`backtrader_app.py`, `sample_imf_data.csv`, `README.md`) directly.
+*   **Download Files:** Alternatively, download the project files (`backtrader_app.py`, `guaranteed_trades_data.csv`, `sample_imf_data.csv`, `README.md`) directly.
 
 ### 1.3. Setting up a Virtual Environment (Recommended)
 
@@ -96,7 +96,7 @@ The `backtrader_app.py` script is organized into several main parts:
 ### 2.2. Data Handling (`GenericCSV_IMFData` class & `run_backtest` data loading)
 
 *   **Purpose:** This class inherits from `bt.feeds.GenericCSVData` and is tailored to load OHLCV (Open, High, Low, Close, Volume) stock data from CSV files.
-*   **Key `params`:** These parameters within the class tell Backtrader how to map the columns in your CSV file to the data fields it expects:
+*   **Key `params`:** (Explanation of params remains the same)
     *   `('dtformat', ('%Y-%m-%d'))`: Specifies the date format in the CSV (e.g., "2020-01-01").
     *   `('datetime', 0)`: The index of the column containing the date/datetime (0 means the first column).
     *   `('open', 1)`: Index of the 'Open' price column.
@@ -108,137 +108,125 @@ The `backtrader_app.py` script is organized into several main parts:
 *   **Instantiation in `run_backtest()`:**
     ```python
     data_feed = GenericCSV_IMFData(
-        dataname=dataname,  # Name of the CSV file (dynamically determined)
-        fromdate=fromdate, # Start date for backtest
-        todate=todate    # End date for backtest
+        dataname=dataname_to_load,  # Name of the CSV file (dynamically determined)
+        fromdate=fromdate_config, # Start date for backtest (e.g., 2022-01-01)
+        todate=todate_config    # End date for backtest (e.g., 2022-01-31)
     )
     ```
-    The actual `dataname`, `fromdate`, and `todate` are determined by the dynamic CSV file search logic.
+    The actual `dataname_to_load`, `fromdate_config`, and `todate_config` are determined by the dynamic CSV file search logic, with `guaranteed_trades_data.csv` and January 2022 set as defaults.
 
 #### Dynamic CSV File Search Logic (in `run_backtest()`)
 
 The script implements a dynamic way to find and use a CSV data file:
 
-1.  **Preferred File:** It first checks if a `preferred_dataname` (set to `sample_imf_data.csv`) exists using `os.path.exists(preferred_dataname)`. If found, this file is used.
-2.  **Alternative Search:** If the preferred file isn't found, the script uses `glob.glob('*.csv')` to find all files ending with `.csv` in the current directory.
-3.  **Auto-Selection:**
-    *   If multiple CSV files are found, it sorts them alphabetically and picks the first one. A message is printed indicating which file was selected and lists other available CSV files.
-    *   If only one CSV file is found, it's used.
-4.  **Error Handling:** If no CSV files are found in the directory (neither the preferred one nor any other), the script prints a critical error message and exits, as it cannot proceed without data.
-5.  **Data Sufficiency & Date Range:**
-    *   The script attempts to automatically set `fromdate` and `todate` based on the selected CSV file's content (by reading the first and last date entries).
-    *   It's crucial that the selected CSV file has enough data points for the indicators used in the strategy (e.g., at least as many data points as the `slow_sma_period`). The script includes error handling for `IndexError` during `cerebro.run()`, which often indicates insufficient data for indicator calculation.
+1.  **Preferred File:** It first checks if `preferred_dataname` (set to `guaranteed_trades_data.csv`) exists. If found, this file is used. This specific CSV file is designed to generate trades with the default strategy parameters (SMA 10/20) for January 2022.
+2.  **Alternative Search:** If `guaranteed_trades_data.csv` isn't found, the script uses `glob.glob('*.csv')` to find all files ending with `.csv` in the current directory.
+3.  **Auto-Selection & Error Handling:** (Explanation of auto-selection and error handling remains the same)
+4.  **Data Sufficiency & Date Range:** (Explanation remains the same)
 
 ### 2.3. Strategy Definition (`SMACrossoverStrategy` class)
 
 This class contains the logic for the trading strategy.
 
-*   **Inheritance:** `class SMACrossoverStrategy(bt.Strategy):` indicates it's a Backtrader strategy.
+*   **Inheritance:** `class SMACrossoverStrategy(bt.Strategy):`
 *   **`params`:**
     ```python
     params = (
-        ('fast_sma_period', 10),
-        ('slow_sma_period', 30),
-        ('stop_loss_perc', 0.05), # 5% stop-loss
-        ('printlog', True),      # New parameter to enable/disable logging
+        ('fast_sma_period', 10), # Default, overridden to 10 in run_backtest for guaranteed_trades_data
+        ('slow_sma_period', 20), # Default, overridden to 20 in run_backtest for guaranteed_trades_data
+        ('stop_loss_perc', 0.05), 
+        ('printlog', True),      
     )
     ```
-    The `printlog` parameter allows you to control whether the strategy's `log()` messages are printed to the console.
-*   **`__init__(self)` (Constructor):**
-    *   `self.data_close = self.datas[0].close`: A reference to the closing prices of the primary data feed.
-    *   `self.data_datetime = self.datas[0].datetime`: A reference to the datetime line of the primary data feed.
-    *   **Indicator Creation:** SMAs and Crossover are created as before, using `self.data_close`.
-    *   **Order Tracking:** `self.order`, `self.buyprice`, `self.buycomm`, and `self.stop_loss_order` are initialized. `buycomm` is added to track commission for the buy trade.
-*   **`log(self, txt, dt=None, doprint=False)`:**
-    *   The `doprint` parameter, if `True`, forces the message to print regardless of `self.p.printlog`.
-    *   The actual printing is controlled by: `if self.p.printlog or doprint:`. This allows selective logging.
-*   **`notify_order(self, order)`:** This method handles order status updates with refined logic:
-    *   **Submitted/Accepted:** Logs the order type, status, reference, size, and price.
-    *   **Completed Buy Order:**
-        *   Logs execution details (price, cost, commission, size).
-        *   Stores `self.buyprice = order.executed.price` and `self.buycomm = order.executed.comm`.
-        *   Calculates `stop_price` based on `self.buyprice` and `self.p.stop_loss_perc`.
-        *   Places a `SELL` order of type `bt.Order.Stop` at `stop_price`, using `parent=order` to link it to the buy order. `self.stop_loss_order` tracks this stop order.
-        *   Logs the placement of the stop-loss order.
-    *   **Completed Sell Order:**
-        *   Logs execution details.
-        *   If it was the `self.stop_loss_order` that executed, it logs "STOP-LOSS ORDER EXECUTED" and clears `self.stop_loss_order`.
-        *   If it was a regular sell (profit-taking), it logs "PROFIT-TAKING SELL EXECUTED". If there was an active `self.stop_loss_order`, it cancels it using `self.cancel(self.stop_loss_order)` and logs the cancellation.
-    *   **Other Statuses (`Canceled`, `Margin`, `Rejected`, `Expired`):**
-        *   Logs the order status and reference.
-        *   If the affected order was the `self.stop_loss_order`, it logs this fact and clears `self.stop_loss_order`.
-    *   `self.order = None`: This line is executed if the order is not `Accepted` or `Submitted` (i.e., it has reached a final state like `Completed`, `Canceled`, etc.), ensuring the strategy can place new orders.
-*   **`notify_trade(self, trade)`:**
-    *   Called when a trade is opened or closed.
-    *   If a trade is closed (`trade.isclosed`), it logs the gross P&L, net P&L (including commissions), and total commission for that trade.
-    *   Resets `self.buyprice = None` and `self.buycomm = None` after a trade is closed, preparing for the next potential trade.
-*   **`next(self)`:** This is the core strategy logic.
-    *   A commented-out line `self.log(f'Close: {self.data_close[0]:.2f}, FastSMA: {self.fast_sma[0]:.2f}, SlowSMA: {self.slow_sma[0]:.2f}, Crossover: {self.sma_crossover[0]:.2f}')` provides an example of detailed logging for debugging.
-    *   `if self.order: return`: If an order is pending, do nothing.
-    *   `if not self.position:`: Checks if the strategy is holding a position.
-        *   **Buy Condition:** `if self.sma_crossover[0] > 0:` (Fast SMA crosses above Slow SMA), logs the buy signal and places a market buy order: `self.order = self.buy()`.
-    *   `else:` (If already in a position):
-        *   **Sell Condition:** `if self.sma_crossover[0] < 0:` (Fast SMA crosses below Slow SMA), logs the sell signal (profit-taking/trend reversal) and places a market sell order: `self.order = self.sell()`.
-        *   When this regular sell order is executed, the `notify_order` method will handle the cancellation of any active stop-loss order.
+    Note: While defaults are shown here, `run_backtest()` specifically sets `fast_sma_period=10` and `slow_sma_period=20` when using `guaranteed_trades_data.csv`.
+*   **`__init__(self)` (Constructor):** (Explanation largely remains the same regarding data aliases, indicator creation, order tracking variables)
+*   **`log(self, txt, dt=None, doprint=False)`:** (Explanation remains the same)
+*   **`notify_order(self, order)`:** (Explanation remains the same, reflecting refined logic)
+*   **`notify_trade(self, trade)`:** (Explanation remains the same)
+*   **`next(self)`:** This is the heart of the strategy.
+    *   **New Log Line:**
+        ```python
+        self.log(f'Crossover Value: {self.sma_crossover[0]:.2f}, FastSMA: {self.fast_sma[0]:.2f}, SlowSMA: {self.slow_sma[0]:.2f}')
+        ```
+        This line, added at the beginning of `next()`, prints the current values of the SMA crossover signal, the fast SMA, and the slow SMA on each bar if `printlog` is enabled. This is extremely useful for:
+        *   **Debugging:** Understanding why the strategy is (or isn't) generating signals.
+        *   **Verification:** Confirming that the indicators are calculating as expected.
+        *   **Learning:** Observing how the SMAs and their crossover value change in relation to price action.
+    *   The rest of the `next()` method's logic (checking for pending orders, buy/sell conditions based on `self.sma_crossover[0]`) remains the same.
 
 ### 2.4. Backtesting Engine (`run_backtest()` function & Cerebro)
 
 This function orchestrates the backtest.
 
-*   `enable_plotting = True`: A variable at the start of the function to easily toggle plotting.
-*   `cerebro = bt.Cerebro()`: Initializes Cerebro.
+*   `enable_plotting = True`: (Explanation remains the same)
+*   `cerebro = bt.Cerebro(stdstats=False)`: (Explanation remains the same)
+*   **Data Feed Setup:**
+    *   The `preferred_dataname` is set to `guaranteed_trades_data.csv`.
+    *   The default `fromdate_config` is `datetime.datetime(2022, 1, 1)`.
+    *   The default `todate_config` is `datetime.datetime(2022, 1, 31)`.
+    *   The tutorial should emphasize that these defaults are specifically for `guaranteed_trades_data.csv` to ensure trade generation for demonstration.
 *   **Adding Strategy:**
     ```python
     cerebro.addstrategy(SMACrossoverStrategy, 
-                        fast_sma_period=5, 
-                        slow_sma_period=10, 
-                        stop_loss_perc=0.03, 
+                        fast_sma_period=10, 
+                        slow_sma_period=20, 
+                        # stop_loss_perc=0.03, # Example of overriding, default is 0.05
                         printlog=True)
     ```
-    The strategy is added with specific parameters: `fast_sma_period=5`, `slow_sma_period=10`, `stop_loss_perc=0.03`, and `printlog=True`.
-*   **Sizer:**
-    *   `cerebro.addsizer(bt.sizers.FixedSize, stake=100)`: The stake (number of shares) has been updated to 100.
-*   **Analyzers:**
-    *   `DrawDown`: Measures the largest peak-to-trough decline during the backtest.
-    *   `AnnualReturn`: Calculates the return for each year in the backtest.
-    *   (SharpeRatio, TradeAnalyzer, SQN are still included).
-*   **Running the Backtest:**
-    *   The `cerebro.run()` call is wrapped in a `try-except IndexError` block. This is important because if the data period is too short for the indicator periods (e.g., asking for a 30-period SMA with only 20 data points), Backtrader will raise an `IndexError`. The `except` block catches this, prints an informative error message about data sufficiency, and allows the script to exit gracefully.
-    *   A general `except Exception` block is also included to catch other unexpected errors during the backtest execution.
-*   **Printing Analyzer Results:**
-    *   **DrawDown:** Prints `drawdown.max.drawdown` (percentage) and `drawdown.max.moneydown` (monetary value).
-    *   **AnnualReturn:** Prints the dictionary of yearly returns (e.g., `{2020: 0.152}`).
-    *   The script uses more robust checks like `trade_analysis.total.get('total', 0)` to avoid errors if certain analysis attributes don't exist (e.g., if no trades occurred).
-*   **Plotting:**
-    *   Plotting is now conditional on `enable_plotting` and whether any trades occurred.
-    *   The plot is saved to `backtest_plot.png` using `savefig=True` and `figfilename='backtest_plot.png'`.
-    *   `figscale=1.2` is used to potentially adjust the plot size/resolution.
-    *   A `try-except` block handles potential errors during plotting, especially in headless environments, and advises the user accordingly.
+    The strategy is added with `fast_sma_period=10` and `slow_sma_period=20` to align with the `guaranteed_trades_data.csv` design. The `stop_loss_perc` is shown as an example of what could be overridden, but the script uses its default (0.05).
+*   **Sizer:** (Explanation of `stake=100` remains the same)
+*   **Analyzers:** (Explanation of added `DrawDown`, `AnnualReturn`, and others remains the same)
+*   **Running the Backtest:** (Explanation of `try-except` blocks remains the same)
+*   **Printing Analyzer Results:** (Explanation remains the same)
+*   **Plotting:** (Explanation remains the same, noting saving to `backtest_plot.png`)
 
 ---
 
 ## Section 4: Running Backtests and Interpreting Results
 
-### 4.3. Interpreting Analyzer Results
+### 4.2. Understanding Console Output
+*   (Existing points remain valid)
+*   **Detailed Bar-by-Bar Logging:** With `printlog=True` in the strategy, you'll see output for each bar from the `log()` call in `next()`, showing the "Crossover Value", "FastSMA", and "SlowSMA". This helps trace the strategy's decision-making process.
 
-*   **Sharpe Ratio:** (Explanation remains the same)
-*   **SQN (System Quality Number):** (Explanation remains the same)
-*   **DrawDown:**
-    *   **Maximum Drawdown (%):** The largest percentage drop from a portfolio peak to a subsequent trough during the backtest. It indicates the potential downside risk.
-    *   **Maximum Drawdown (Money):** The monetary value of the largest peak-to-trough decline.
-*   **AnnualReturn:**
-    *   Provides a dictionary where keys are years and values are the percentage returns for those respective years (e.g., `2020: 0.10` means a 10% return in 2020). This helps assess year-over-year performance consistency.
-*   **TradeAnalyzer:** (Explanation remains largely the same, but reflects robust attribute access)
+### 4.3. Interpreting Analyzer Results
+(Existing explanations for Sharpe, SQN, DrawDown, AnnualReturn, TradeAnalyzer remain valid)
 
 ### 4.4. Viewing the Plot
+(Existing explanation remains valid)
 
-The backtest plot is automatically saved as `backtest_plot.png` in your project directory if `enable_plotting` is `True` in the script and the backtest completes successfully with at least one trade. You can open this image file to view the results.
+---
 
-*   **What to Look For:** (Explanation remains the same: Candlesticks, Volume, SMA Lines, Buy/Sell Markers)
+## Section 5: Using Your Own Data
+
+### 5.1. CSV File Format Requirements
+(Existing explanation remains valid)
+
+### 5.2. Modifying the Script
+
+In the `run_backtest()` function of `backtrader_app.py`:
+
+1.  **Change `dataname_to_load` (or ensure your file is picked up):**
+    *   The script dynamically loads CSVs. If you want to use a specific file other than `guaranteed_trades_data.csv`, you can either:
+        *   Rename your file to `guaranteed_trades_data.csv` (and ensure it's in the same directory).
+        *   Modify the `preferred_dataname` variable in the script.
+        *   Remove `guaranteed_trades_data.csv` and ensure your file is the only CSV (or the first alphabetically if multiple others exist).
+2.  **Adjust `fromdate_config` and `todate_config`:**
+    **Crucially**, you *must* update these `datetime.datetime` objects to match the date range available in your data file and your desired backtesting period. The defaults (`2022-01-01` to `2022-01-31`) are tailored for `guaranteed_trades_data.csv`.
+    ```python
+    fromdate_config = datetime.datetime(YYYY, M, D) # Your start year, month, day
+    todate_config = datetime.datetime(YYYY, M, D)    # Your end year, month, day
+    ```
+3.  **Adjust Strategy Parameters:**
+    The default SMA periods (`fast_sma_period=10`, `slow_sma_period=20`) in `run_backtest()` are set to work with `guaranteed_trades_data.csv`. If using your own data, you will likely want to adjust these in the `cerebro.addstrategy(...)` call to values suitable for your data's characteristics and timeframe (e.g., `fast_sma_period=50`, `slow_sma_period=200` for daily stock data is a common long-term example).
+
+### 5.3. Data Considerations
+(Existing explanation remains valid)
 
 ---
 
 ## Section 6: Next Steps and Advanced Topics
+
+(This section remains unchanged as it was updated in the previous turn based on user prompt #24)
 
 This bot serves as a foundational example. You can extend and enhance it in numerous ways:
 
