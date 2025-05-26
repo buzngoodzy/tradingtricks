@@ -1,6 +1,8 @@
 import backtrader as bt
 import datetime
 import matplotlib # For plotting
+import os # For os.path.exists
+import glob # For glob.glob to find CSV files
 
 # --- I. Data Handling Section ---
 class GenericCSV_IMFData(bt.feeds.GenericCSVData):
@@ -138,17 +140,33 @@ class SMACrossoverStrategy(bt.Strategy):
 # - Parameter Passing: Override in `cerebro.addstrategy(SMACrossoverStrategy, fast_sma_period=15)`. [Source: Backtrader docs on cerebro.addstrategy]
 # - Order Execution: `self.close()`, other types like `bt.Order.Limit`, `bt.Order.StopTrail`. [Source: e.g., exectype param in 97, Backtrader docs on Order Types]
 
+# Python built-in libraries
+import os
+import glob
+
+# --- I. Data Handling Section --- (GenericCSV_IMFData class definition remains the same as provided in prompt)
+# ... (GenericCSV_IMFData class definition as in prompt) ...
+# (Conceptual Comments for Data Handling as in prompt)
+
+# --- II. Strategy Definition Section --- (SMACrossoverStrategy class definition as modified above)
+# ... (SMACrossoverStrategy class definition as modified above, including new log line in next()) ...
+# (Conceptual Comments for Strategy Section as in prompt)
+
+
 # --- III. Cerebro Setup & Backtest Execution Section ---
 def run_backtest():
-    cerebro = bt.Cerebro(stdstats=False) # stdstats=False to disable default observers/analyzers if adding custom ones
+    # Configuration
+    enable_plotting = True # Master switch for plotting
+
+    cerebro = bt.Cerebro(stdstats=False) # Disable standard observers for custom setup
     # [Source: 64, 69, 82 for Cerebro init]
 
     # --- Dynamic CSV File Loading ---
-    preferred_dataname = 'guaranteed_trades_data.csv' # Updated preferred CSV
+    preferred_dataname = 'guaranteed_trades_data.csv' # MODIFIED: Preferred CSV
     dataname_to_load = None
-    csv_files_found = glob.glob('*.csv')
+    csv_files_found = glob.glob('*.csv') # glob is now imported at the top
 
-    if os.path.exists(preferred_dataname):
+    if os.path.exists(preferred_dataname): # os is now imported at the top
         dataname_to_load = preferred_dataname
         print(f"Using preferred data file: {dataname_to_load}")
     elif csv_files_found:
@@ -209,13 +227,19 @@ def run_backtest():
     try:
         results = cerebro.run() # [Source: 64, 70, 83 for run command]
     except IndexError:
-        print("CRITICAL ERROR: IndexError during cerebro.run().")
+        print("\nCRITICAL ERROR: IndexError during cerebro.run().") # Added newline for clarity
         print("This often means the data period is too short for the indicator periods (e.g., slow_sma_period).")
-        print(f"Data: {dataname_to_load}, From: {fromdate.strftime('%Y-%m-%d')}, To: {todate.strftime('%Y-%m-%d')}")
-        print(f"Slow SMA Period: {SMACrossoverStrategy.params.slow_sma_period} (or as overridden in addstrategy)") # Needs access to actual param
+        print(f"Data file: {dataname_to_load}, From: {fromdate.strftime('%Y-%m-%d')}, To: {todate.strftime('%Y-%m-%d')}") # Changed label "Data:" to "Data file:"
+        if cerebro.strats and cerebro.strats[0]: # Check if strategy list and first strategy exist
+            # Accessing the parameters of the first (and typically only) strategy instance
+            strategy_instance_params = cerebro.strats[0][0].params
+            print(f"Actual Fast SMA Period used: {strategy_instance_params.fast_sma_period}")
+            print(f"Actual Slow SMA Period used: {strategy_instance_params.slow_sma_period}")
+        else:
+            print("Could not retrieve strategy parameters as no strategy was fully initialized or added to Cerebro.")
         return # Exit if critical error
     except Exception as e:
-        print(f"CRITICAL ERROR during cerebro.run(): {e}")
+        print(f"\nCRITICAL ERROR during cerebro.run(): {e}") # Added newline for clarity
         return # Exit if critical error
 
 
